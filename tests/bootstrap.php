@@ -8,7 +8,8 @@ require_once __DIR__ . '/stubs/whmcs_stubs.php';
 // Load WHMCS class stubs (each in their own namespace file)
 require_once __DIR__ . '/stubs/ResultsList.php';
 require_once __DIR__ . '/stubs/ImportItem.php';
-require_once __DIR__ . '/stubs/Domain.php';
+require_once __DIR__ . '/stubs/SearchResult.php';
+require_once __DIR__ . '/stubs/LookupResultsList.php';
 require_once __DIR__ . '/stubs/Capsule.php';
 
 // Load composer autoloader

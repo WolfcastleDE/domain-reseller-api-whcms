@@ -6,6 +6,17 @@ namespace WHMCS\Module\Registrar\DomainResellerApi;
 
 class ApiClient
 {
+    /** Module version, replaced by the release workflow. */
+    public const VERSION = 'dev';
+
+    /**
+     * Optional factory used by domainresellerapi_getClient() instead of `new ApiClient`
+     * (tests inject a client that records requests).
+     *
+     * @var null|callable(array): ApiClient
+     */
+    public static $factory = null;
+
     private string $apiKey;
     private string $baseUrl;
     private bool $sandbox;
@@ -14,7 +25,8 @@ class ApiClient
     public function __construct(string $apiKey, string $baseUrl = 'https://domain-reseller-api.de', bool $sandbox = false, int $timeout = 30)
     {
         $this->apiKey = $apiKey;
-        $this->baseUrl = rtrim($baseUrl, '/');
+        // Accept a base URL entered with the version prefix (https://host/api/v1)
+        $this->baseUrl = (string) preg_replace('#/api/v1$#', '', rtrim(trim($baseUrl), '/'));
         $this->sandbox = $sandbox;
         $this->timeout = $timeout;
 
@@ -54,18 +66,33 @@ class ApiClient
         return $this->get('/api/v1/domains/check/' . urlencode($domain));
     }
 
+    /**
+     * Bulk availability check (POST /domains/check), up to 50 domains per request.
+     */
+    public function checkDomains(array $domains, ?int $years = null): array
+    {
+        $body = ['domains' => array_values($domains)];
+        if ($years !== null) {
+            $body['years'] = $years;
+        }
+        return $this->post('/api/v1/domains/check', $body);
+    }
+
+    /**
+     * GET /domains/suggest?q=label&defaults=tld1,tld2
+     */
     public function suggestDomains(string $query, array $tlds = []): array
     {
-        $params = ['query' => $query];
+        $params = ['q' => $query];
         if (!empty($tlds)) {
-            $params['tlds'] = implode(',', $tlds);
+            $params['defaults'] = implode(',', $tlds);
         }
         return $this->get('/api/v1/domains/suggest', $params);
     }
 
-    public function listDomains(int $page = 1, int $limit = 50): array
+    public function listDomains(int $page = 1, int $pageSize = 50): array
     {
-        return $this->get('/api/v1/domains/', ['page' => $page, 'limit' => $limit]);
+        return $this->get('/api/v1/domains/', ['page' => $page, 'pageSize' => min(100, max(1, $pageSize))]);
     }
 
     public function getDomain(string $domain): array
@@ -73,15 +100,22 @@ class ApiClient
         return $this->get('/api/v1/domains/' . urlencode($domain));
     }
 
-    public function registerDomain(string $domain, string $ownerContact, ?string $adminContact = null, ?string $techContact = null, array $nameservers = [], int $years = 1): array
+    /**
+     * POST /domains/register. $years must be a bookable term of the TLD (e.g. 2 for .ai);
+     * null lets the API use the TLD's minimum term. $extra is merged into the body
+     * (e.g. whoisPrivacy/acceptWppTerms).
+     */
+    public function registerDomain(string $domain, string $ownerContact, ?string $adminContact = null, ?string $techContact = null, array $nameservers = [], ?int $years = null, array $extra = []): array
     {
         $body = [
             'domain' => $domain,
-            'years' => $years,
             'contacts' => [
                 'owner' => $ownerContact,
             ],
         ];
+        if ($years !== null) {
+            $body['years'] = $years;
+        }
 
         if ($adminContact !== null) {
             $body['contacts']['admin'] = $adminContact;
@@ -89,11 +123,13 @@ class ApiClient
         if ($techContact !== null) {
             $body['contacts']['tech'] = $techContact;
         }
-        if (!empty($nameservers)) {
-            $body['nameservers'] = array_values(array_filter($nameservers));
+        $nameservers = array_values(array_filter($nameservers));
+        // The API requires 2-6 nameservers when the field is sent; without it the managed DNS is used
+        if (count($nameservers) >= 2) {
+            $body['nameservers'] = array_slice($nameservers, 0, 6);
         }
 
-        return $this->post('/api/v1/domains/register', $body);
+        return $this->post('/api/v1/domains/register', $body + $extra);
     }
 
     public function transferDomain(string $domain, string $authCode, string $ownerContact, ?string $adminContact = null, ?string $techContact = null): array
@@ -121,9 +157,76 @@ class ApiClient
         return $this->patch('/api/v1/domains/' . urlencode($domain), $data);
     }
 
-    public function deleteDomain(string $domain): array
+    /**
+     * PATCH /domains/{domain}/contacts — assign other contact handles to the roles
+     * owner/admin/tech/billing. An owner change is only executed with $confirmOwnerChange
+     * (otherwise the API answers 409 with the price).
+     */
+    public function updateDomainContacts(string $domain, array $contacts, bool $confirmOwnerChange = false): array
     {
-        return $this->delete('/api/v1/domains/' . urlencode($domain));
+        $body = ['contacts' => $contacts];
+        if ($confirmOwnerChange) {
+            $body['confirmOwnerChange'] = true;
+        }
+        return $this->patch('/api/v1/domains/' . urlencode($domain) . '/contacts', $body);
+    }
+
+    /**
+     * DELETE /domains/{domain}: cancels at the end of the term, or immediately with $immediate.
+     */
+    public function deleteDomain(string $domain, bool $immediate = false): array
+    {
+        return $this->request('DELETE', '/api/v1/domains/' . urlencode($domain), $immediate ? ['immediate' => 'true'] : []);
+    }
+
+    /**
+     * POST /domains/{domain}/renew. $years must be a bookable term (null = TLD minimum).
+     */
+    public function renewDomain(string $domain, ?int $years = null): array
+    {
+        return $this->post('/api/v1/domains/' . urlencode($domain) . '/renew', $years !== null ? ['years' => $years] : []);
+    }
+
+    public function getTransferLock(string $domain): array
+    {
+        return $this->get('/api/v1/domains/' . urlencode($domain) . '/lock');
+    }
+
+    public function setTransferLock(string $domain, bool $locked): array
+    {
+        return $this->put('/api/v1/domains/' . urlencode($domain) . '/lock', ['locked' => $locked]);
+    }
+
+    /**
+     * PUT /domains/{domain}/whois-privacy (OpenProvider TLDs, owner of type person).
+     */
+    public function setWhoisPrivacy(string $domain, bool $enabled, bool $acceptTerms = false): array
+    {
+        $body = ['enabled' => $enabled];
+        if ($enabled) {
+            $body['acceptWppTerms'] = $acceptTerms;
+        }
+        return $this->put('/api/v1/domains/' . urlencode($domain) . '/whois-privacy', $body);
+    }
+
+    public function listHosts(string $domain): array
+    {
+        return $this->get('/api/v1/domains/' . urlencode($domain) . '/hosts');
+    }
+
+    public function createHost(string $domain, string $hostname, ?string $ipv4 = null, ?string $ipv6 = null): array
+    {
+        return $this->post('/api/v1/domains/' . urlencode($domain) . '/hosts', ['hostname' => $hostname] + self::ips($ipv4, $ipv6));
+    }
+
+    public function updateHost(string $domain, string $hostname, ?string $ipv4 = null, ?string $ipv6 = null): array
+    {
+        return $this->put('/api/v1/domains/' . urlencode($domain) . '/hosts/' . urlencode($hostname), self::ips($ipv4, $ipv6));
+    }
+
+    public function deleteHost(string $domain, string $hostname): array
+    {
+        return $this->delete('/api/v1/domains/' . urlencode($domain) . '/hosts/' . urlencode($hostname));
     }
 
     public function getDomainState(string $domain): array
@@ -161,9 +264,9 @@ class ApiClient
         return $this->put('/api/v1/domains/' . urlencode($domain) . '/dnssec', $data);
     }
 
-    public function transferOut(string $domain): array
+    public function transferOut(string $domain, bool $approve = true): array
     {
-        return $this->post('/api/v1/domains/' . urlencode($domain) . '/transfer-out');
+        return $this->post('/api/v1/domains/' . urlencode($domain) . '/transfer-out', ['approve' => $approve]);
     }
 
     public function tradeDomain(string $domain, array $data): array
@@ -171,6 +274,9 @@ class ApiClient
         return $this->post('/api/v1/domains/' . urlencode($domain) . '/trade', $data);
     }
 
+    /**
+     * POST /domains/{domain}/hold (.de only). $data: disconnect (required), execDate, execOnExpire.
+     */
     public function holdDomain(string $domain, array $data = []): array
     {
         return $this->post('/api/v1/domains/' . urlencode($domain) . '/hold', $data);
@@ -185,9 +291,9 @@ class ApiClient
     // Contacts
     // ──────────────────────────────────────────────
 
-    public function listContacts(int $page = 1, int $limit = 50): array
+    public function listContacts(int $page = 1, int $pageSize = 50): array
     {
-        return $this->get('/api/v1/contacts/', ['page' => $page, 'limit' => $limit]);
+        return $this->get('/api/v1/contacts/', ['page' => $page, 'pageSize' => min(100, max(1, $pageSize))]);
     }
 
     public function getContact(string $handle): array
@@ -265,9 +371,9 @@ class ApiClient
         return $this->get('/api/v1/dns/' . urlencode($domain) . '/export');
     }
 
-    public function importZone(string $domain, array $data): array
+    public function importZone(string $domain, string $zoneFile): array
     {
-        return $this->post('/api/v1/dns/' . urlencode($domain) . '/import', $data);
+        return $this->post('/api/v1/dns/' . urlencode($domain) . '/import', ['zoneFile' => $zoneFile]);
     }
 
     // ──────────────────────────────────────────────
@@ -284,12 +390,14 @@ class ApiClient
         return $this->get('/api/v1/webhooks/');
     }
 
-    public function createWebhook(string $url, array $events = [], bool $isActive = true): array
+    /**
+     * POST /webhooks/ — at least one event is required; new webhooks are active.
+     */
+    public function createWebhook(string $url, array $events): array
     {
         return $this->post('/api/v1/webhooks/', [
             'url' => $url,
-            'events' => $events,
-            'isActive' => $isActive,
+            'events' => array_values($events),
         ]);
     }
 
@@ -316,6 +424,18 @@ class ApiClient
     // ──────────────────────────────────────────────
     // HTTP methods
     // ──────────────────────────────────────────────
+
+    private static function ips(?string $ipv4, ?string $ipv6): array
+    {
+        $body = [];
+        if ($ipv4 !== null && $ipv4 !== '') {
+            $body['ipv4'] = $ipv4;
+        }
+        if ($ipv6 !== null && $ipv6 !== '') {
+            $body['ipv6'] = $ipv6;
+        }
+        return $body;
+    }
 
     private function get(string $endpoint, array $params = []): array
     {
@@ -354,7 +474,7 @@ class ApiClient
             'Authorization: Bearer ' . $this->apiKey,
             'Content-Type: application/json',
             'Accept: application/json',
-            'User-Agent: WHMCS-DomainResellerApi/1.0',
+            'User-Agent: WHMCS-DomainResellerApi/' . self::VERSION,
         ];
 
         if ($this->sandbox) {
@@ -375,16 +495,17 @@ class ApiClient
             CURLOPT_SSL_VERIFYHOST => 2,
         ]);
 
-        if (in_array($method, ['POST', 'PATCH', 'PUT']) && !empty($body)) {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
+        if (in_array($method, ['POST', 'PATCH', 'PUT'], true)) {
+            // Always send a JSON object: the API validates bodies as objects
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(empty($body) ? new \stdClass() : $body));
         }
 
         $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = $response === false ? curl_error($ch) : '';
         curl_close($ch);
 
-        if ($curlError) {
+        if ($curlError !== '') {
             return [
                 'success' => false,
                 'error' => 'Connection error: ' . $curlError,
@@ -392,15 +513,47 @@ class ApiClient
             ];
         }
 
-        $decoded = json_decode($response, true);
+        return self::normalizeResponse($httpCode, (string) $response);
+    }
 
-        if ($decoded === null) {
+    /**
+     * Normalises an API response into the envelope used by the module:
+     * `success` (false for every non-2xx status), `data`, `error` (a single readable
+     * message built from error/message/details) and `httpCode`.
+     */
+    public static function normalizeResponse(int $httpCode, string $raw): array
+    {
+        $decoded = $raw !== '' ? json_decode($raw, true) : null;
+
+        if (!is_array($decoded)) {
             return [
                 'success' => false,
-                'error' => 'Invalid JSON response from API',
+                'error' => 'Invalid response from the Domain Reseller API (HTTP ' . $httpCode . ')',
                 'httpCode' => $httpCode,
-                'raw' => substr($response, 0, 200),
+                'raw' => substr($raw, 0, 200),
             ];
+        }
+
+        if ($httpCode < 200 || $httpCode >= 300) {
+            $decoded['success'] = false;
+        } elseif (!array_key_exists('success', $decoded)) {
+            // Endpoints without an envelope (health) are successful on 2xx
+            $decoded['success'] = true;
+        }
+
+        if ($decoded['success'] !== true) {
+            $decoded['success'] = false;
+            $parts = [];
+            foreach (['error', 'message', 'details'] as $key) {
+                if (isset($decoded[$key]) && is_string($decoded[$key]) && trim($decoded[$key]) !== '' && !in_array(trim($decoded[$key]), $parts, true)) {
+                    $parts[] = trim($decoded[$key]);
+                }
+            }
+            $message = implode(': ', $parts);
+            if ($message === '') {
+                $message = 'The Domain Reseller API returned an error (HTTP ' . $httpCode . ')';
+            }
+            $decoded['error'] = strlen($message) > 500 ? substr($message, 0, 497) . '...' : $message;
         }
 
         $decoded['httpCode'] = $httpCode;

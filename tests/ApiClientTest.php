@@ -115,7 +115,8 @@ class ApiClientTest extends TestCase
         $req = $this->client->getLastRequest();
         $this->assertSame('GET', $req['method']);
         $this->assertSame('/api/v1/domains/suggest', $req['endpoint']);
-        $this->assertSame(['query' => 'mysite'], $req['params']);
+        // The API expects `q` (and `defaults` for preferred TLDs)
+        $this->assertSame(['q' => 'mysite'], $req['params']);
     }
 
     public function testSuggestDomainsWithTlds(): void
@@ -123,7 +124,7 @@ class ApiClientTest extends TestCase
         $this->client->suggestDomains('mysite', ['de', 'com']);
 
         $req = $this->client->getLastRequest();
-        $this->assertSame(['query' => 'mysite', 'tlds' => 'de,com'], $req['params']);
+        $this->assertSame(['q' => 'mysite', 'defaults' => 'de,com'], $req['params']);
     }
 
     public function testListDomains(): void
@@ -133,7 +134,7 @@ class ApiClientTest extends TestCase
         $req = $this->client->getLastRequest();
         $this->assertSame('GET', $req['method']);
         $this->assertSame('/api/v1/domains/', $req['endpoint']);
-        $this->assertSame(['page' => 2, 'limit' => 25], $req['params']);
+        $this->assertSame(['page' => 2, 'pageSize' => 25], $req['params']);
     }
 
     public function testGetDomain(): void
@@ -153,7 +154,8 @@ class ApiClientTest extends TestCase
         $this->assertSame('POST', $req['method']);
         $this->assertSame('/api/v1/domains/register', $req['endpoint']);
         $this->assertSame('test.de', $req['body']['domain']);
-        $this->assertSame(1, $req['body']['years']);
+        // Without a term the API uses the TLD's minimum term (e.g. 2 years for .ai)
+        $this->assertArrayNotHasKey('years', $req['body']);
         $this->assertSame('OWNER-123', $req['body']['contacts']['owner']);
         $this->assertArrayNotHasKey('admin', $req['body']['contacts']);
         $this->assertArrayNotHasKey('tech', $req['body']['contacts']);
@@ -176,6 +178,25 @@ class ApiClientTest extends TestCase
         $this->assertSame('ADMIN-456', $req['body']['contacts']['admin']);
         $this->assertSame('TECH-789', $req['body']['contacts']['tech']);
         $this->assertSame(['ns1.example.com', 'ns2.example.com'], $req['body']['nameservers']);
+    }
+
+    public function testRegisterDomainOmitsSingleNameserver(): void
+    {
+        // The API requires 2-6 nameservers when the field is sent
+        $this->client->registerDomain('test.de', 'OWNER-123', null, null, ['ns1.example.com'], 1);
+
+        $req = $this->client->getLastRequest();
+        $this->assertArrayNotHasKey('nameservers', $req['body']);
+        $this->assertSame(1, $req['body']['years']);
+    }
+
+    public function testRegisterDomainExtraFields(): void
+    {
+        $this->client->registerDomain('test.com', 'OWNER-123', null, null, [], null, ['whoisPrivacy' => true, 'acceptWppTerms' => true]);
+
+        $req = $this->client->getLastRequest();
+        $this->assertTrue($req['body']['whoisPrivacy']);
+        $this->assertTrue($req['body']['acceptWppTerms']);
     }
 
     public function testRegisterDomainFiltersEmptyNameservers(): void
@@ -216,6 +237,104 @@ class ApiClientTest extends TestCase
         $req = $this->client->getLastRequest();
         $this->assertSame('DELETE', $req['method']);
         $this->assertSame('/api/v1/domains/test.de', $req['endpoint']);
+        $this->assertSame([], $req['params']);
+    }
+
+    public function testDeleteDomainImmediate(): void
+    {
+        $this->client->deleteDomain('test.de', true);
+
+        $req = $this->client->getLastRequest();
+        $this->assertSame(['immediate' => 'true'], $req['params']);
+    }
+
+    public function testRenewDomain(): void
+    {
+        $this->client->renewDomain('test.ai', 2);
+
+        $req = $this->client->getLastRequest();
+        $this->assertSame('POST', $req['method']);
+        $this->assertSame('/api/v1/domains/test.ai/renew', $req['endpoint']);
+        $this->assertSame(['years' => 2], $req['body']);
+    }
+
+    public function testRenewDomainDefaultTerm(): void
+    {
+        $this->client->renewDomain('test.de');
+
+        $req = $this->client->getLastRequest();
+        $this->assertSame([], $req['body']);
+    }
+
+    public function testTransferLock(): void
+    {
+        $this->client->getTransferLock('test.com');
+        $req = $this->client->getLastRequest();
+        $this->assertSame('GET', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/lock', $req['endpoint']);
+
+        $this->client->setTransferLock('test.com', false);
+        $req = $this->client->getLastRequest();
+        $this->assertSame('PUT', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/lock', $req['endpoint']);
+        $this->assertSame(['locked' => false], $req['body']);
+    }
+
+    public function testWhoisPrivacy(): void
+    {
+        $this->client->setWhoisPrivacy('test.com', true, true);
+        $req = $this->client->getLastRequest();
+        $this->assertSame('PUT', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/whois-privacy', $req['endpoint']);
+        $this->assertSame(['enabled' => true, 'acceptWppTerms' => true], $req['body']);
+
+        $this->client->setWhoisPrivacy('test.com', false);
+        $this->assertSame(['enabled' => false], $this->client->getLastRequest()['body']);
+    }
+
+    public function testHosts(): void
+    {
+        $this->client->listHosts('test.com');
+        $this->assertSame('/api/v1/domains/test.com/hosts', $this->client->getLastRequest()['endpoint']);
+
+        $this->client->createHost('test.com', 'ns1.test.com', '192.0.2.1');
+        $req = $this->client->getLastRequest();
+        $this->assertSame('POST', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/hosts', $req['endpoint']);
+        $this->assertSame(['hostname' => 'ns1.test.com', 'ipv4' => '192.0.2.1'], $req['body']);
+
+        $this->client->updateHost('test.com', 'ns1.test.com', null, '2001:db8::1');
+        $req = $this->client->getLastRequest();
+        $this->assertSame('PUT', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/hosts/ns1.test.com', $req['endpoint']);
+        $this->assertSame(['ipv6' => '2001:db8::1'], $req['body']);
+
+        $this->client->deleteHost('test.com', 'ns1.test.com');
+        $req = $this->client->getLastRequest();
+        $this->assertSame('DELETE', $req['method']);
+        $this->assertSame('/api/v1/domains/test.com/hosts/ns1.test.com', $req['endpoint']);
+    }
+
+    public function testUpdateDomainContacts(): void
+    {
+        $this->client->updateDomainContacts('test.de', ['admin' => 'ADMIN-2']);
+        $req = $this->client->getLastRequest();
+        $this->assertSame('PATCH', $req['method']);
+        $this->assertSame('/api/v1/domains/test.de/contacts', $req['endpoint']);
+        $this->assertSame(['contacts' => ['admin' => 'ADMIN-2']], $req['body']);
+
+        $this->client->updateDomainContacts('test.de', ['owner' => 'OWNER-2'], true);
+        $this->assertSame(['contacts' => ['owner' => 'OWNER-2'], 'confirmOwnerChange' => true], $this->client->getLastRequest()['body']);
+    }
+
+    public function testCheckDomainsBulk(): void
+    {
+        $this->client->checkDomains(['a.de', 'a.com']);
+
+        $req = $this->client->getLastRequest();
+        $this->assertSame('POST', $req['method']);
+        $this->assertSame('/api/v1/domains/check', $req['endpoint']);
+        $this->assertSame(['domains' => ['a.de', 'a.com']], $req['body']);
     }
 
     public function testGetDomainState(): void
@@ -287,6 +406,7 @@ class ApiClientTest extends TestCase
         $this->client->transferOut('test.de');
 
         $req = $this->client->getLastRequest();
+        $this->assertSame(['approve' => true], $req['body']);
         $this->assertSame('POST', $req['method']);
         $this->assertSame('/api/v1/domains/test.de/transfer-out', $req['endpoint']);
     }
@@ -302,7 +422,7 @@ class ApiClientTest extends TestCase
 
     public function testHoldDomain(): void
     {
-        $this->client->holdDomain('test.de', ['hold' => true]);
+        $this->client->holdDomain('test.de', ['disconnect' => true]);
 
         $req = $this->client->getLastRequest();
         $this->assertSame('POST', $req['method']);
@@ -327,7 +447,7 @@ class ApiClientTest extends TestCase
         $req = $this->client->getLastRequest();
         $this->assertSame('GET', $req['method']);
         $this->assertSame('/api/v1/contacts/', $req['endpoint']);
-        $this->assertSame(['page' => 3, 'limit' => 10], $req['params']);
+        $this->assertSame(['page' => 3, 'pageSize' => 10], $req['params']);
     }
 
     public function testGetContact(): void
@@ -458,9 +578,10 @@ class ApiClientTest extends TestCase
 
     public function testImportZone(): void
     {
-        $this->client->importZone('test.de', ['zone' => 'data']);
+        $this->client->importZone('test.de', '@ 3600 IN A 192.0.2.1');
 
         $req = $this->client->getLastRequest();
+        $this->assertSame(['zoneFile' => '@ 3600 IN A 192.0.2.1'], $req['body']);
         $this->assertSame('POST', $req['method']);
         $this->assertSame('/api/v1/dns/test.de/import', $req['endpoint']);
     }
@@ -487,14 +608,15 @@ class ApiClientTest extends TestCase
 
     public function testCreateWebhook(): void
     {
-        $this->client->createWebhook('https://example.com/hook', ['domain.register'], true);
+        $this->client->createWebhook('https://example.com/hook', ['domain.registered']);
 
         $req = $this->client->getLastRequest();
         $this->assertSame('POST', $req['method']);
         $this->assertSame('/api/v1/webhooks/', $req['endpoint']);
         $this->assertSame('https://example.com/hook', $req['body']['url']);
-        $this->assertSame(['domain.register'], $req['body']['events']);
-        $this->assertTrue($req['body']['isActive']);
+        $this->assertSame(['domain.registered'], $req['body']['events']);
+        // POST /webhooks has no isActive field
+        $this->assertArrayNotHasKey('isActive', $req['body']);
     }
 
     public function testUpdateWebhook(): void
@@ -542,6 +664,71 @@ class ApiClientTest extends TestCase
 
         $result = $this->client->getDomain('test.de');
         $this->assertSame($expected, $result);
+    }
+
+    public function testNormalizeValidationError(): void
+    {
+        // Elysia validation errors: HTTP 400 with error + details
+        $result = ApiClient::normalizeResponse(400, json_encode([
+            'success' => false,
+            'error' => 'Validation error',
+            'details' => 'Expected union value at /type',
+        ]));
+
+        $this->assertFalse($result['success']);
+        $this->assertSame('Validation error: Expected union value at /type', $result['error']);
+        $this->assertSame(400, $result['httpCode']);
+    }
+
+    public function testNormalizeForbiddenUsesMessage(): void
+    {
+        $result = ApiClient::normalizeResponse(403, json_encode([
+            'success' => false,
+            'error' => 'Forbidden',
+            'message' => 'This API key lacks the required permission scope for this endpoint.',
+        ]));
+
+        $this->assertFalse($result['success']);
+        $this->assertSame('Forbidden: This API key lacks the required permission scope for this endpoint.', $result['error']);
+    }
+
+    public function testNormalizeErrorStatusWithoutEnvelope(): void
+    {
+        $result = ApiClient::normalizeResponse(503, json_encode(['status' => 'degraded']));
+        $this->assertFalse($result['success']);
+        $this->assertStringContainsString('HTTP 503', $result['error']);
+    }
+
+    public function testNormalizeSuccessKeepsData(): void
+    {
+        $result = ApiClient::normalizeResponse(200, json_encode(['success' => true, 'data' => ['handle' => 'H-1']]));
+        $this->assertTrue($result['success']);
+        $this->assertSame('H-1', $result['data']['handle']);
+        $this->assertArrayNotHasKey('error', $result);
+    }
+
+    public function testNormalizeHealthWithoutEnvelope(): void
+    {
+        $result = ApiClient::normalizeResponse(200, json_encode(['status' => 'ok']));
+        $this->assertTrue($result['success']);
+    }
+
+    public function testNormalizeInvalidJson(): void
+    {
+        $result = ApiClient::normalizeResponse(502, '<html>Bad Gateway</html>');
+        $this->assertFalse($result['success']);
+        $this->assertSame('<html>Bad Gateway</html>', $result['raw']);
+    }
+
+    public function testBaseUrlWithVersionPrefixIsAccepted(): void
+    {
+        $this->assertInstanceOf(ApiClient::class, new ApiClient('k', 'https://domain-reseller-api.de/api/v1/'));
+    }
+
+    public function testPlainHttpRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new ApiClient('k', 'http://example.com');
     }
 
     public function testMultipleQueuedResponses(): void

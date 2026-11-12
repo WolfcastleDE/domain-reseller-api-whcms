@@ -4,10 +4,6 @@ namespace WHMCS\Domain\TopLevel;
 
 class ImportItem
 {
-    public const STATUS_NOT_REGISTERED = 'not_registered';
-    public const STATUS_REGISTERED = 'registered';
-    public const STATUS_UNKNOWN = 'unknown';
-
     private string $extension = '';
     private int $minYears = 1;
     private int $maxYears = 10;
