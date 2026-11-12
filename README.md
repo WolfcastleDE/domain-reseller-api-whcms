@@ -20,7 +20,7 @@ API documentation: <https://domain-reseller-api.de/dokumentation>
 | **Auth codes** | Retrieve auth codes (`.de`/`.eu` from the registry, other TLDs from the stored code), reset (`.de`) |
 | **DNS** | DNS record management on the managed DNS (A, AAAA, CNAME, MX, TXT, SRV, …; WHMCS *URL* records become *Redirect*) |
 | **Sync** | Expiry date and status sync, transfer completion sync |
-| **TLD pricing** | *Registrar TLD Sync* imports net EUR prices incl. setup fees, minimum/maximum terms and redemption fees |
+| **TLD pricing** | *Registrar TLD Sync* imports net EUR prices incl. setup fees, minimum/maximum terms and redemption fees (prices for the minimum term, e.g. 2 years for `.ai`, as WHMCS expects) |
 | **Admin actions** | Restore domain, cancel deletion, reset auth code, enable/disable managed DNS |
 
 ## Requirements

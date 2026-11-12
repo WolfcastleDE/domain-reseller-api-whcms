@@ -1308,10 +1308,26 @@ function domainresellerapi_GetDomainSuggestions(array $params): LookupResultsLis
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Import the TLD pricing (net EUR). registerPrice/renewPrice are per year at the
- * minimum term (minYears, e.g. 2 for .ai), transferPrice is the total of a transfer
- * (transferYears). The setup fee (e.g. .de) is charged on registration and transfer.
+ * Import the TLD pricing (net EUR). WHMCS expects the cost price for the minimum
+ * registration term, not per year (https://developers.whmcs.com/domain-registrars/tld-pricing-sync/).
+ * The API's registerPrice/renewPrice are per year at the minimum term (minYears, e.g.
+ * 2 for .ai), so the exact term total from `periods` is used (fallback: per year ×
+ * minYears). transferPrice already is the total of a transfer (transferYears). The
+ * setup fee (e.g. .de) is charged on registration and transfer.
  */
+function domainresellerapi_minTermPrice(array $tldInfo, string $field, int $minYears): ?float
+{
+    foreach ((array) ($tldInfo['periods'] ?? []) as $period) {
+        if ((int) ($period['years'] ?? 0) === $minYears && isset($period[$field])) {
+            return (float) $period[$field];
+        }
+    }
+    if (!isset($tldInfo[$field])) {
+        return null;
+    }
+    return round((float) $tldInfo[$field] * $minYears, 2);
+}
+
 function domainresellerapi_GetTldPricing(array $params): ResultsList
 {
     $results = new ResultsList();
@@ -1342,8 +1358,8 @@ function domainresellerapi_GetTldPricing(array $params): ResultsList
             $item->setExtension($tld);
             $item->setMinYears($minYears);
             $item->setMaxYears(max($minYears, (int) ($tldInfo['maxYears'] ?? 10)));
-            $item->setRegisterPrice(round((float) ($tldInfo['registerPrice'] ?? 0) + $setup, 2));
-            $item->setRenewPrice((float) ($tldInfo['renewPrice'] ?? 0));
+            $item->setRegisterPrice(round((float) domainresellerapi_minTermPrice($tldInfo, 'registerPrice', $minYears) + $setup, 2));
+            $item->setRenewPrice((float) domainresellerapi_minTermPrice($tldInfo, 'renewPrice', $minYears));
             $item->setTransferPrice(round((float) ($tldInfo['transferPrice'] ?? 0) + $setup, 2));
 
             if (!empty($tldInfo['restorePrice'])) {

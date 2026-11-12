@@ -778,7 +778,10 @@ class RegistrarModuleTest extends TestCase
                     'periods' => [['years' => 1, 'registerPrice' => '4.50', 'renewPrice' => '4.50']]],
                 ['tld' => 'ai', 'registerPrice' => '70.00', 'renewPrice' => '70.00', 'transferPrice' => '140.00', 'transferYears' => 2,
                     'restorePrice' => null, 'setupPrice' => null, 'minYears' => 2, 'maxYears' => 10,
-                    'periods' => [['years' => 2, 'registerPrice' => '140.00', 'renewPrice' => '140.00']]],
+                    'periods' => [['years' => 2, 'registerPrice' => '139.90', 'renewPrice' => '139.80'], ['years' => 3, 'registerPrice' => '200.00', 'renewPrice' => '200.00']]],
+                // Without periods: per-year price × minimum term
+                ['tld' => 'tm', 'registerPrice' => '30.00', 'renewPrice' => '31.00', 'transferPrice' => '30.00', 'transferYears' => 1,
+                    'restorePrice' => null, 'setupPrice' => null, 'minYears' => 2, 'maxYears' => 10],
                 ['tld' => '', 'registerPrice' => '1.00'],
             ],
         ]);
@@ -787,7 +790,7 @@ class RegistrarModuleTest extends TestCase
 
         $this->assertInstanceOf(ResultsList::class, $results);
         $this->assertSame([['GET', '/api/v1/pricing/']], $this->calls());
-        $this->assertCount(2, $results);
+        $this->assertCount(3, $results);
 
         /** @var ImportItem $de */
         $de = $results[0];
@@ -801,9 +804,17 @@ class RegistrarModuleTest extends TestCase
 
         /** @var ImportItem $ai */
         $ai = $results[1];
+        // WHMCS expects the cost price for the minimum term (2 years), not per year
         $this->assertSame(2, $ai->getMinYears());
-        $this->assertSame(70.0, $ai->getRegisterPrice());
+        $this->assertSame(139.9, $ai->getRegisterPrice());
+        $this->assertSame(139.8, $ai->getRenewPrice());
         $this->assertSame(140.0, $ai->getTransferPrice());
+
+        /** @var ImportItem $tm */
+        $tm = $results[2];
+        $this->assertSame(60.0, $tm->getRegisterPrice());
+        $this->assertSame(62.0, $tm->getRenewPrice());
+        $this->assertSame(30.0, $tm->getTransferPrice());
     }
 
     // ─── Sync ───
