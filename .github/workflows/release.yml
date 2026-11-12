@@ -40,15 +40,19 @@ jobs:
 
       - name: Inject version into module
         run: |
-          sed -i "s/'APIVersion' => '1.1'/'APIVersion' => '1.1',\n        'Version' => '${{ steps.version.outputs.version }}'/" \
-            modules/registrars/domainresellerapi/domainresellerapi.php
+          sed -i "s/public const VERSION = 'dev';/public const VERSION = '${{ steps.version.outputs.version }}';/" \
+            modules/registrars/domainresellerapi/lib/ApiClient.php
+          # Fail the release if the placeholder was not replaced
+          grep -q "public const VERSION = '${{ steps.version.outputs.version }}';" \
+            modules/registrars/domainresellerapi/lib/ApiClient.php
 
       - name: Package module
         run: |
-          mkdir -p dist
-          cp -r modules dist/
-          cd dist
-          zip -r ../domainresellerapi-${{ steps.version.outputs.version }}.zip modules/
+          # The ZIP contains the folder domainresellerapi/ and is extracted into <whmcs>/modules/registrars/
+          cp LICENSE modules/registrars/domainresellerapi/LICENSE
+          cd modules/registrars
+          zip -r "$GITHUB_WORKSPACE/domainresellerapi-${{ steps.version.outputs.version }}.zip" domainresellerapi
+          unzip -l "$GITHUB_WORKSPACE/domainresellerapi-${{ steps.version.outputs.version }}.zip"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
