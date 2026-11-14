@@ -84,6 +84,42 @@ class RegistrarModuleTest extends TestCase
         self::fail("No $method $endpoint request");
     }
 
+    // ─── config_validate (connection test on save) ───
+
+    public function testConfigValidateSucceeds(): void
+    {
+        $this->client->queueResponse($this->ok(['domains' => []]));
+
+        domainresellerapi_config_validate($this->params(['Sandbox' => 'on']));
+
+        $this->assertSame([['GET', '/api/v1/domains/']], $this->calls());
+        $this->assertSame(['page' => 1, 'pageSize' => 1], $this->client->requests[0]['params']);
+    }
+
+    public function testConfigValidateRejectsInvalidKey(): void
+    {
+        $this->client->queueResponse($this->err('Invalid API key', 401));
+
+        $this->expectException(\WHMCS\Exception\Module\InvalidConfiguration::class);
+        $this->expectExceptionMessage('Connection test failed: Invalid API key. Check the API key');
+        domainresellerapi_config_validate($this->params());
+    }
+
+    public function testConfigValidateRequiresKey(): void
+    {
+        $this->expectException(\WHMCS\Exception\Module\InvalidConfiguration::class);
+        domainresellerapi_config_validate($this->params(['ApiKey' => '']));
+    }
+
+    public function testConfigValidateRejectsPlainHttpUrl(): void
+    {
+        ApiClient::$factory = null;
+
+        $this->expectException(\WHMCS\Exception\Module\InvalidConfiguration::class);
+        $this->expectExceptionMessage('HTTPS');
+        domainresellerapi_config_validate($this->params(['ApiUrl' => 'http://domain-reseller-api.de']));
+    }
+
     // ─── RegisterDomain ───
 
     public function testRegisterDomain(): void
@@ -116,6 +152,27 @@ class RegistrarModuleTest extends TestCase
 
         // WHMCS renews on payment: the API's own auto-renewal is turned off
         $this->assertSame(['autoRenew' => false], $this->client->requests[2]['body']);
+    }
+
+    public function testRegisterDomainUsesUntransliteratedContactData(): void
+    {
+        // WHMCS transliterates contact params for registrar modules and keeps the input in 'original'
+        $this->client->queueResponse($this->ok(['handle' => 'OWNER-1']));
+        $this->client->queueResponse($this->ok(['domainId' => 'd1']));
+
+        domainresellerapi_RegisterDomain($this->params([
+            'firstname' => 'Jurgen', 'lastname' => 'Groszmann-Celik', 'address1' => 'Musterstrasze 12a', 'city' => 'Munchen',
+            'original' => ['firstname' => 'Jürgen', 'lastname' => 'Größmann-Çelik', 'address1' => 'Musterstraße 12a', 'city' => 'München', 'contactdetails' => ['ignored']],
+        ]));
+
+        $contact = $this->request('POST', '/api/v1/contacts/')['body'];
+        $this->assertSame('Jürgen', $contact['firstName']);
+        $this->assertSame('Größmann-Çelik', $contact['lastName']);
+        $this->assertSame('Musterstraße', $contact['street']);
+        $this->assertSame('12a', $contact['houseNumber']);
+        $this->assertSame('München', $contact['city']);
+        // Values WHMCS did not convert still come from the normal params
+        $this->assertSame('10115', $contact['postalCode']);
     }
 
     public function testRegisterDomainKeepsApiAutoRenewWhenConfigured(): void
@@ -511,6 +568,28 @@ class RegistrarModuleTest extends TestCase
         $this->assertSame('Redirect', $this->client->requests[4]['body']['type']);
     }
 
+    public function testSaveDnsCreatesARecordSubmittedTwiceOnce(): void
+    {
+        $this->client->queueResponse($this->ok(['useManagedDns' => true]));
+        $this->client->queueResponse($this->ok(['records' => [
+            ['id' => 'keep', 'type' => 'AAAA', 'name' => 'shop', 'content' => '2001:db8::1', 'ttl' => 3600],
+        ]]));
+
+        $result = domainresellerapi_SaveDNS($this->params(['dnsrecords' => [
+            ['hostname' => 'shop', 'type' => 'AAAA', 'address' => '2001:db8::1'],
+            ['hostname' => 'shop', 'type' => 'AAAA', 'address' => '2001:db8::1'],
+            ['hostname' => 'www', 'type' => 'A', 'address' => '192.0.2.2'],
+            ['hostname' => 'www', 'type' => 'A', 'address' => '192.0.2.2'],
+        ]]));
+
+        $this->assertSame(['success' => true], $result);
+        $this->assertSame([
+            ['GET', '/api/v1/domains/example.de'],
+            ['GET', '/api/v1/dns/example.de'],
+            ['POST', '/api/v1/dns/example.de/records'],
+        ], $this->calls());
+    }
+
     public function testSaveDnsPreservesRecordsWhenAllCreationsFail(): void
     {
         $this->client->queueResponse($this->ok(['useManagedDns' => true]));
@@ -619,6 +698,24 @@ class RegistrarModuleTest extends TestCase
         $this->assertSame('', $body['organization']);
     }
 
+    public function testSaveContactDetailsUsesUntransliteratedContactData(): void
+    {
+        $this->client->queueResponse($this->ok(['contacts' => ['owner' => 'OWNER-1']]));
+        $this->client->queueResponse($this->apiContact('OWNER-1'));
+        $this->client->queueResponse(['success' => true, 'httpCode' => 200]);
+
+        $result = domainresellerapi_SaveContactDetails($this->params([
+            'contactdetails' => ['Registrant' => $this->details(['Last Name' => 'Weisz', 'Address 1' => 'Konigsallee 92', 'City' => 'Dusseldorf'])],
+            'original' => ['contactdetails' => ['Registrant' => $this->details(['Last Name' => 'Weiß', 'Address 1' => 'Königsallee 92', 'City' => 'Düsseldorf'])]],
+        ]));
+
+        $this->assertSame(['success' => true], $result);
+        $body = $this->request('PATCH', '/api/v1/contacts/OWNER-1')['body'];
+        $this->assertSame('Weiß', $body['lastName']);
+        $this->assertSame('Königsallee', $body['street']);
+        $this->assertSame('Düsseldorf', $body['city']);
+    }
+
     public function testSaveContactDetailsSharedHandleGetsOwnContact(): void
     {
         // The API assigns the owner to roles that were not set at registration
@@ -664,6 +761,8 @@ class RegistrarModuleTest extends TestCase
         $this->assertStringContainsString('owner change', $result['error']);
         $this->assertSame('organization', $this->client->requests[2]['body']['type']);
         $this->assertSame(['contacts' => ['owner' => 'OWNER-ORG']], $this->client->requests[3]['body']);
+        // The contact created for the refused change is removed again
+        $this->assertSame(['DELETE', '/api/v1/contacts/OWNER-ORG'], $this->calls()[4]);
     }
 
     public function testSaveContactDetailsOwnerTypeChangeConfirmed(): void
@@ -884,12 +983,20 @@ class RegistrarModuleTest extends TestCase
         $this->assertSame([], domainresellerapi_TransferSync($this->params()));
     }
 
-    public function testTransferSyncFailed(): void
+    /**
+     * @dataProvider failedTransferStatuses
+     */
+    public function testTransferSyncFailed(string $status): void
     {
-        // Failed and cancelled transfers end in the state "deleted"
-        $this->client->queueResponse($this->ok(['status' => 'deleted']));
+        // A failed/cancelled transfer moves to the state machine's "deleted", stored as pending_delete
+        $this->client->queueResponse($this->ok(['status' => $status]));
 
         $this->assertTrue(domainresellerapi_TransferSync($this->params())['failed']);
+    }
+
+    public static function failedTransferStatuses(): array
+    {
+        return [['pending_delete'], ['deleted']];
     }
 
     // ─── Deletion & admin actions ───

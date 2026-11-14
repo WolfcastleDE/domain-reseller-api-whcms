@@ -11,6 +11,7 @@ require_once __DIR__ . '/stubs/ImportItem.php';
 require_once __DIR__ . '/stubs/SearchResult.php';
 require_once __DIR__ . '/stubs/LookupResultsList.php';
 require_once __DIR__ . '/stubs/Capsule.php';
+require_once __DIR__ . '/stubs/InvalidConfiguration.php';
 
 // Load composer autoloader
 require_once __DIR__ . '/../vendor/autoload.php';
