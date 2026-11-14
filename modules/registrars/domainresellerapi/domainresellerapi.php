@@ -192,12 +192,25 @@ function domainresellerapi_limit(string $value, int $length): string
 }
 
 /**
+ * WHMCS passes contact data to registrar modules transliterated to ASCII ("Jürgen
+ * Weiß, Düsseldorf" arrives as "Jurgen Weisz, Dusseldorf") and keeps the input as
+ * entered in $params['original']. The API accepts UTF-8, so the original values are
+ * used where WHMCS provides them.
+ */
+function domainresellerapi_originalParams(array $params): array
+{
+    $original = $params['original'] ?? null;
+    return is_array($original) ? $original + $params : $params;
+}
+
+/**
  * Normalised contact (firstname, lastname, companyname, email, phone, address1,
  * address2, city, state, postcode, country) from WHMCS order params.
  */
 function domainresellerapi_contactFromParams(array $params, string $prefix = ''): array
 {
-    $value = static fn (string $key): string => trim((string) ($params[$prefix . $key] ?? ''));
+    $params = domainresellerapi_originalParams($params);
+    $value = static fn (string $key): string => is_scalar($params[$prefix . $key] ?? null) ? trim((string) $params[$prefix . $key]) : '';
 
     return [
         'firstname' => $value('firstname'),
@@ -342,7 +355,7 @@ function domainresellerapi_ownerExtra(array $params): array
         $extra['protection'] = true;
     }
     if (strtolower(ltrim((string) ($params['tld'] ?? ''), '.')) === 'it') {
-        $fields = (array) ($params['additionalfields'] ?? []);
+        $fields = (array) (domainresellerapi_originalParams($params)['additionalfields'] ?? []);
         $pin = trim((string) ($fields['Tax ID'] ?? $fields['RegCode'] ?? ''));
         if ($pin !== '') {
             $extra['pin'] = domainresellerapi_limit($pin, 36);
@@ -532,6 +545,35 @@ function domainresellerapi_getConfigArray(): array
             'Description' => 'API request timeout in seconds.',
         ],
     ];
+}
+
+/**
+ * Connection test when the settings are saved (System Settings → Domain Registrars):
+ * an authenticated request with the entered key, URL and sandbox flag. WHMCS keeps the
+ * old settings and shows the message when an InvalidConfiguration exception is thrown.
+ *
+ * @see https://developers.whmcs.com/domain-registrars/config-options/
+ * @throws \WHMCS\Exception\Module\InvalidConfiguration
+ */
+function domainresellerapi_config_validate(array $params): void
+{
+    if (trim((string) ($params['ApiKey'] ?? '')) === '') {
+        throw new \WHMCS\Exception\Module\InvalidConfiguration('Please enter your Domain Reseller API key.');
+    }
+
+    try {
+        $result = domainresellerapi_getClient($params)->listDomains(1, 1);
+    } catch (\InvalidArgumentException $e) {
+        throw new \WHMCS\Exception\Module\InvalidConfiguration($e->getMessage());
+    }
+
+    if (empty($result['success'])) {
+        $code = (int) ($result['httpCode'] ?? 0);
+        $hint = in_array($code, [401, 403], true)
+            ? ' Check the API key and its scopes (domains, contacts, dns, pricing).'
+            : ($code === 0 ? ' Check the API URL.' : '');
+        throw new \WHMCS\Exception\Module\InvalidConfiguration('Connection test failed: ' . domainresellerapi_error($result, 'HTTP ' . $code) . '.' . $hint);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -949,6 +991,7 @@ function domainresellerapi_SaveDNS(array $params): array
         $errors = [];
         $attempted = 0;
         $created = 0;
+        $submitted = [];
         foreach ((array) ($params['dnsrecords'] ?? []) as $record) {
             $type = strtoupper(trim((string) ($record['type'] ?? '')));
             $hostname = trim((string) ($record['hostname'] ?? ''));
@@ -970,6 +1013,11 @@ function domainresellerapi_SaveDNS(array $params): array
             $priority = in_array($type, ['MX', 'SRV'], true) ? (int) ($record['priority'] ?? 10) : null;
 
             $key = domainresellerapi_dnsKey($type, $name, $address, $priority);
+            // The same record submitted twice (e.g. re-entered in the empty row) is created once
+            if (isset($submitted[$key])) {
+                continue;
+            }
+            $submitted[$key] = true;
             if (!empty($obsolete[$key])) {
                 // Unchanged: keep the existing record
                 array_shift($obsolete[$key]);
@@ -1095,7 +1143,8 @@ function domainresellerapi_SaveContactDetails(array $params): array
         }
 
         $contacts = (array) ($domainInfo['data']['contacts'] ?? []);
-        $contactDetails = (array) ($params['contactdetails'] ?? []);
+        // Untransliterated input (see domainresellerapi_originalParams)
+        $contactDetails = (array) (domainresellerapi_originalParams($params)['contactdetails'] ?? []);
 
         $errors = [];
         $updated = [];   // handle => payload applied in this request
@@ -1156,6 +1205,10 @@ function domainresellerapi_SaveContactDetails(array $params): array
             $result = $client->updateDomainContacts($domain, $handles, !empty($params['ConfirmOwnerChange']));
             logModuleCall('domainresellerapi', 'SaveContactDetails-Assign', ['domain' => $domain, 'contacts' => $handles], $result, '', [$params['ApiKey'] ?? '']);
             if (empty($result['success'])) {
+                // The new handles were not assigned: remove them again (best effort)
+                foreach (array_unique($handles) as $handle) {
+                    $client->deleteContact($handle);
+                }
                 $message = domainresellerapi_error($result, 'contact assignment failed');
                 if (($result['httpCode'] ?? 0) === 409 && isset($result['ownerChange'])) {
                     $message = sprintf(
@@ -1440,8 +1493,10 @@ function domainresellerapi_TransferSync(array $params): array
                 }
                 return $values;
 
+            case 'pending_delete':
             case 'deleted':
-                // Failed or cancelled transfers end in the state "deleted"
+                // A failed or cancelled transfer moves the domain to the state "deleted",
+                // which the API stores and reports as pending_delete
                 return ['failed' => true, 'reason' => 'Transfer failed or was cancelled'];
 
             default:

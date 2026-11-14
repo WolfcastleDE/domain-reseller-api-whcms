@@ -11,7 +11,7 @@ API documentation: <https://domain-reseller-api.de/dokumentation>
 | Area | What the module does |
 | --- | --- |
 | **Ordering** | Registration for the booked term (TLD minimum terms such as 2 years for `.ai` are respected), transfers with auth code, availability check (bulk), domain suggestions, premium domains (when enabled in WHMCS) |
-| **Contacts** | Creates registrant/admin/tech handles from the order (`person` or `organization`, street and house number are split automatically), shows and updates the WHOIS contacts; roles that share a handle get their own contact when they differ; a person ⇄ organisation switch of the registrant is an owner change and only performed when allowed in the settings |
+| **Contacts** | Creates registrant/admin/tech handles from the order (`person` or `organization`, street and house number are split automatically, names and addresses keep umlauts and other non-ASCII characters), shows and updates the WHOIS contacts; roles that share a handle get their own contact when they differ; a person ⇄ organisation switch of the registrant is an owner change and only performed when allowed in the settings |
 | **.it** | The nic.it RegCode is taken from the `.it` additional field *Tax ID* and sent as contact field `pin` |
 | **Renewals** | Paid renewals via `POST /domains/{domain}/renew` for the WHMCS term; domains in the redemption period are restored. The API's own auto-renewal is disabled (WHMCS is the billing master) unless *Keep API Auto-Renew* is enabled |
 | **Nameservers** | Get/save nameservers, register/modify/delete child nameservers (glue records) |
@@ -22,17 +22,20 @@ API documentation: <https://domain-reseller-api.de/dokumentation>
 | **Sync** | Expiry date and status sync, transfer completion sync |
 | **TLD pricing** | *Registrar TLD Sync* imports net EUR prices incl. setup fees, minimum/maximum terms and redemption fees (prices for the minimum term, e.g. 2 years for `.ai`, as WHMCS expects) |
 | **Admin actions** | Restore domain, cancel deletion, reset auth code, enable/disable managed DNS |
+| **Setup** | Connection test when the registrar settings are saved (wrong key, URL or scopes are reported and not saved) |
 
 ## Requirements
 
-- WHMCS 8.x with PHP 8.1 or newer (`curl`, `json`, `mbstring`)
+- WHMCS 9.x with a PHP version it supports (tested: WHMCS 9.1.1, PHP 8.3); the module itself needs
+  PHP 8.1 or newer (`curl`, `json`, `mbstring`). WHMCS 8.x has not been tested.
 - An account at [domain-reseller-api.de](https://domain-reseller-api.de) with an API key (scopes
   `domains`, `contacts`, `dns` and `pricing`)
 
 ## Installation
 
-1. Download `domainresellerapi-<version>.zip` from the
-   [latest GitHub release](../../releases/latest).
+1. Download [`domainresellerapi.zip`](https://github.com/WolfcastleDE/domain-reseller-api-whcms/releases/latest/download/domainresellerapi.zip)
+   (always the latest version) or `domainresellerapi-<version>.zip` from the
+   [GitHub releases](../../releases).
 2. Extract the ZIP into `<whmcs>/modules/registrars/`, so that the module ends up in
    `<whmcs>/modules/registrars/domainresellerapi/`.
 3. In WHMCS go to **System Settings → Domain Registrars**, activate **Domain Reseller API** and
@@ -47,7 +50,13 @@ API documentation: <https://domain-reseller-api.de/dokumentation>
    | Allow Owner Changes | Perform contact changes that need an owner change (may be charged) |
    | API Timeout | Request timeout in seconds (5–120) |
 
-4. Optional: import TLDs and prices via **Utilities → Registrar TLD Sync**.
+   Saving runs a connection test with these settings; WHMCS keeps the old settings and shows the
+   error if it fails.
+
+4. Optional: import TLDs and prices via **Utilities → Registrar TLD Sync** (the default currency
+   or a currency with an exchange rate must be EUR, the API's currency).
+5. Optional: use the module for domain searches under **System Settings → Domain Pricing →
+   Lookup Provider → Domain Registrar → Domain Reseller API**.
 
 ## Development
 
@@ -55,6 +64,8 @@ API documentation: <https://domain-reseller-api.de/dokumentation>
 docker build -t drapi-test-whmcs .
 docker run --rm drapi-test-whmcs vendor/bin/phpunit
 ```
+
+End-to-end tests in a real WHMCS installation against the API sandbox: see [e2e/README.md](e2e/README.md).
 
 Releases are built by GitHub Actions when a tag `v*` is pushed.
 
@@ -68,7 +79,7 @@ Glue-Records, Transfer-Lock, WHOIS-Privacy, Managed DNS, TLD-Preissync).
 nach `<whmcs>/modules/registrars/` entpacken (Ergebnis: `modules/registrars/domainresellerapi/`).
 Anschließend unter **System Settings → Domain Registrars** das Modul **Domain Reseller API**
 aktivieren, den API-Key eintragen und für Tests den **Sandbox Mode** einschalten. Preise und TLDs
-lassen sich über **Utilities → Registrar TLD Sync** importieren.
+lassen sich über **Utilities → Registrar TLD Sync** importieren. Getestet mit WHMCS 9.1.1 (PHP 8.3).
 
 Verlängerungen steuert WHMCS (bei bezahlter Rechnung); die eigene Auto-Verlängerung der API wird
 deshalb vom Modul abgeschaltet. Dokumentation der API: <https://domain-reseller-api.de/dokumentation>

@@ -53,9 +53,13 @@ jobs:
           cd modules/registrars
           zip -r "$GITHUB_WORKSPACE/domainresellerapi-${{ steps.version.outputs.version }}.zip" domainresellerapi
           unzip -l "$GITHUB_WORKSPACE/domainresellerapi-${{ steps.version.outputs.version }}.zip"
+          # Unversioned copy for a stable link: releases/latest/download/domainresellerapi.zip
+          cp "$GITHUB_WORKSPACE/domainresellerapi-${{ steps.version.outputs.version }}.zip" "$GITHUB_WORKSPACE/domainresellerapi.zip"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: domainresellerapi-${{ steps.version.outputs.version }}.zip
+          files: |
+            domainresellerapi-${{ steps.version.outputs.version }}.zip
+            domainresellerapi.zip
           generate_release_notes: true

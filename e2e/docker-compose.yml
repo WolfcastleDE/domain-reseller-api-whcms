@@ -1,0 +1,107 @@
+# Local end-to-end environment: WHMCS + this registrar module + the Domain Reseller API backend (sandbox).
+#
+#   ./e2e/run.sh            build, install and test everything
+#   ./e2e/run.sh down       remove the environment again
+#
+# WHMCS shares the network namespace of the API container, so the module reaches the backend at
+# http://localhost:3000 (the module only accepts plain HTTP for localhost). All ports are bound to
+# 127.0.0.1: a WHMCS development license must not be publicly reachable.
+name: dra-whmcs-e2e
+
+services:
+  db:
+    image: mysql:8.0
+    networks:
+      e2e:
+        ipv4_address: ${E2E_SUBNET_PREFIX:-172.26.0}.2
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: domain_reseller
+    volumes:
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot", "--silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  api:
+    image: oven/bun:1
+    entrypoint: ["sh", "/e2e/api-entrypoint.sh"]
+    networks:
+      e2e:
+        # WHMCS (sharing this namespace) sees this address as its server IP, and the WHMCS license
+        # binds to it on first use. A fixed address keeps the license valid across re-creations.
+        ipv4_address: ${E2E_SUBNET_PREFIX:-172.26.0}.3
+    environment:
+      DATABASE_URL: mysql://root:root@db:3306/domain_reseller
+      JWT_SECRET: e2e-jwt-secret-e2e-jwt-secret-e2e-0123
+      APP_ENCRYPTION_KEY: e2e-encryption-key-e2e-encryption-key-0123
+      NODE_ENV: development
+      PORT: "3000"
+    volumes:
+      - ${BACKEND_PATH:?set BACKEND_PATH}:/src:ro
+      - ./api-entrypoint.sh:/e2e/api-entrypoint.sh:ro
+      - ./e2e-backend-setup.ts:/e2e/e2e-backend-setup.ts:ro
+      - shared:/shared
+      - api-app:/app
+    ports:
+      - "127.0.0.1:${WHMCS_PORT:-18081}:80"     # WHMCS (shares this network namespace)
+      - "127.0.0.1:${API_PORT:-13001}:3000"     # Domain Reseller API
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -s /shared/api_key && bun -e \"const r = await fetch('http://localhost:3000/api/v1/health/'); process.exit(r.ok ? 0 : 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+
+  whmcs:
+    image: dra-whmcs-e2e:php${PHP_VERSION:-8.3}
+    build:
+      context: ./whmcs
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    network_mode: service:api
+    entrypoint: ["sh", "/e2e/whmcs-entrypoint.sh"]
+    environment:
+      WHMCS_LICENSE_KEY: ${WHMCS_LICENSE_KEY:-}
+      WHMCS_URL: http://127.0.0.1:${WHMCS_PORT:-18081}/
+    volumes:
+      - ./.cache/whmcs-${WHMCS_VERSION:-9.1.1}:/whmcs-src:ro
+      - ./.cache/module:/e2e/module:ro           # the module ZIP to install (release or local build)
+      - ./whmcs-entrypoint.sh:/e2e/whmcs-entrypoint.sh:ro
+      - ./scripts:/e2e/scripts:ro
+      - shared:/shared
+      - whmcs-www:/var/www/html
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Browser tests and screenshots (only started by run.sh)
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.56.1-noble
+    profiles: ["tests"]
+    network_mode: host   # reaches WHMCS through the published port, like a real browser
+    working_dir: /e2e/ui
+    entrypoint: ["sh", "-c", "cd /tmp && [ -d node_modules/playwright ] || npm i --silent playwright@1.56.1 >/dev/null 2>&1; NODE_PATH=/tmp/node_modules node /e2e/ui/$${TEST:-admin}.cjs"]
+    environment:
+      BASE_URL: http://127.0.0.1:${WHMCS_PORT:-18081}
+    volumes:
+      - ./ui:/e2e/ui:ro
+      - shared:/shared
+      - ./artifacts:/artifacts
+
+networks:
+  e2e:
+    ipam:
+      config:
+        - subnet: ${E2E_SUBNET_PREFIX:-172.26.0}.0/24
+
+volumes:
+  db:
+  shared:
+  api-app:
+  whmcs-www:
